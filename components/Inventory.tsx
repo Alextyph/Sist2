@@ -79,6 +79,39 @@ const blank: FormValues = {
   quantity: "1",
   notes: "",
 };
+type TextField = Exclude<keyof FormValues, "type" | "quantity" | "notes">;
+const fieldMeta: Record<TextField, [label: string, placeholder: string]> = {
+  model: ["Modelo", "Ej. Dell OptiPlex 7090"],
+  assetCode: ["Código patrimonial", "Identificador institucional"],
+  serialNumber: ["Número de serie", "Número de serie del fabricante"],
+  color: ["Color", "Ej. Negro"],
+  size: ["Tamaño", "Ej. SFF, 24 pulgadas"],
+  building: ["Edificio", "Ej. Edificio 6"],
+  room: ["Aula / laboratorio", "Ej. Laboratorio 603"],
+};
+// Campos que se solicitan por tipo (RF-7.2, RF-7.3, RF-7.4).
+// [campo, obligatorio]
+const typeFields: Record<InventoryType, Array<[TextField, boolean]>> = {
+  COMPUTER: [
+    ["model", true],
+    ["assetCode", true],
+    ["serialNumber", true],
+    ["color", true],
+    ["size", true],
+    ["building", true],
+    ["room", false],
+  ],
+  PROJECTOR: [
+    ["model", true],
+    ["assetCode", true],
+    ["color", true],
+    ["size", true],
+  ],
+  CONTROL: [["model", true]],
+  ADAPTER: [["model", true]],
+};
+const usesQuantity = (type: InventoryType) =>
+  type === "CONTROL" || type === "ADAPTER";
 const dateBoundary = (date: string, end = false) =>
   date
     ? new Date(`${date}T${end ? "23:59:59.999" : "00:00:00"}`).toISOString()
@@ -464,34 +497,20 @@ function InventoryDetail({
               </span>
             </div>
             <dl className="ops-detail">
-              <div>
-                <dt>Código patrimonial</dt>
-                <dd>{detail.data.assetCode || "—"}</dd>
-              </div>
-              <div>
-                <dt>Número de serie</dt>
-                <dd>{detail.data.serialNumber || "—"}</dd>
-              </div>
-              <div>
-                <dt>Edificio</dt>
-                <dd>{detail.data.building || "Sin especificar"}</dd>
-              </div>
-              <div>
-                <dt>Aula / laboratorio</dt>
-                <dd>{detail.data.room || "Sin especificar"}</dd>
-              </div>
-              <div>
-                <dt>Color</dt>
-                <dd>{detail.data.color || "—"}</dd>
-              </div>
-              <div>
-                <dt>Tamaño / formato</dt>
-                <dd>{detail.data.size || "—"}</dd>
-              </div>
-              <div>
-                <dt>Cantidad</dt>
-                <dd>{detail.data.quantity}</dd>
-              </div>
+              {typeFields[detail.data.type]
+                .filter(([key]) => key !== "model")
+                .map(([key]) => (
+                  <div key={key}>
+                    <dt>{fieldMeta[key][0]}</dt>
+                    <dd>{detail.data![key] || "—"}</dd>
+                  </div>
+                ))}
+              {usesQuantity(detail.data.type) && (
+                <div>
+                  <dt>Cantidad total</dt>
+                  <dd>{detail.data.quantity}</dd>
+                </div>
+              )}
               <div>
                 <dt>Última actualización</dt>
                 <dd>{formatDate(detail.data.updatedAt, true)}</dd>
@@ -654,41 +673,29 @@ function InventoryForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const single = values.type === "COMPUTER" || values.type === "PROJECTOR";
+  const fields = typeFields[values.type];
+  const withQuantity = usesQuantity(values.type);
   const update = (key: keyof FormValues, value: string) => {
     setValues((v) => ({
       ...v,
       [key]: value,
       ...(key === "type" ? { quantity: "1" } : {}),
     }));
-    setErrors((e) => ({ ...e, [key]: "" }));
+    setErrors((e) => (key === "type" ? {} : { ...e, [key]: "" }));
   };
-  const required = (key: keyof FormValues) =>
-    key === "model" ||
-    key === "quantity" ||
-    (single && ["assetCode", "color", "size"].includes(key)) ||
-    (values.type === "COMPUTER" && ["building", "serialNumber"].includes(key));
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (busy) return;
     const validation: Record<string, string> = {};
-    (
-      [
-        "model",
-        "assetCode",
-        "color",
-        "size",
-        "building",
-        "serialNumber",
-      ] as const
-    ).forEach((key) => {
-      if (required(key) && !values[key].trim())
+    fields.forEach(([key, isRequired]) => {
+      if (isRequired && !values[key].trim())
         validation[key] =
           "Este campo es obligatorio para el tipo seleccionado.";
     });
     if (
-      !Number.isInteger(Number(values.quantity)) ||
-      Number(values.quantity) < 1
+      withQuantity &&
+      (!Number.isInteger(Number(values.quantity)) ||
+        Number(values.quantity) < 1)
     )
       validation.quantity = "Ingresa una cantidad entera mayor o igual a 1.";
     setErrors(validation);
@@ -696,16 +703,13 @@ function InventoryForm({
     setBusy(true);
     onBusyChange(true);
     setError("");
-    const body = {
+    // Solo se envían los campos que corresponden al tipo seleccionado.
+    const body: Record<string, string | number | null> = {
       ...(!item ? { type: values.type } : {}),
-      model: values.model.trim(),
-      assetCode: values.assetCode.trim() || null,
-      color: values.color.trim() || null,
-      size: values.size.trim() || null,
-      building: values.building.trim() || null,
-      room: values.room.trim() || null,
-      serialNumber: values.serialNumber.trim() || null,
-      quantity: single ? 1 : Number(values.quantity),
+      ...Object.fromEntries(
+        fields.map(([key]) => [key, values[key].trim() || null]),
+      ),
+      ...(withQuantity ? { quantity: Number(values.quantity) } : {}),
       notes: values.notes.trim() || null,
     };
     try {
@@ -745,15 +749,6 @@ function InventoryForm({
       onBusyChange(false);
     }
   }
-  const fields: Array<[keyof FormValues, string, string]> = [
-    ["model", "Modelo / nombre", "Ej. Dell OptiPlex 7090"],
-    ["assetCode", "Código patrimonial", "Identificador institucional"],
-    ["serialNumber", "Número de serie", "Número de serie del fabricante"],
-    ["color", "Color", "Ej. Negro"],
-    ["size", "Tamaño / formato", "Ej. SFF, 24 pulgadas"],
-    ["building", "Edificio", "Ej. Edificio 6"],
-    ["room", "Aula / laboratorio", "Ej. Laboratorio 603"],
-  ];
   return (
     <form className="ops-form" onSubmit={(e) => void submit(e)} noValidate>
       {error && <ErrorNotice message={error} />}
@@ -775,46 +770,42 @@ function InventoryForm({
             ))}
           </select>
         </Field>
-        <Field
-          label="Cantidad"
-          id="item-quantity"
-          required
-          error={errors.quantity}
-          hint={
-            single
-              ? "Las computadoras y proyectores se registran individualmente."
-              : undefined
-          }
-        >
-          <input
-            id="item-quantity"
-            type="number"
-            min="1"
-            step="1"
-            value={single ? "1" : values.quantity}
-            readOnly={single}
-            aria-invalid={!!errors.quantity}
-            onChange={(e) => update("quantity", e.target.value)}
-          />
-        </Field>
-        {fields.map(([key, label, placeholder]) => (
+        {fields.map(([key, isRequired]) => (
           <Field
             key={key}
-            label={label}
+            label={fieldMeta[key][0]}
             id={`item-${key}`}
-            required={required(key)}
+            required={isRequired}
             error={errors[key]}
           >
             <input
               id={`item-${key}`}
               value={values[key]}
-              placeholder={placeholder}
-              required={required(key)}
+              placeholder={fieldMeta[key][1]}
+              required={isRequired}
               aria-invalid={!!errors[key]}
               onChange={(e) => update(key, e.target.value)}
             />
           </Field>
         ))}
+        {withQuantity && (
+          <Field
+            label="Cantidad total"
+            id="item-quantity"
+            required
+            error={errors.quantity}
+          >
+            <input
+              id="item-quantity"
+              type="number"
+              min="1"
+              step="1"
+              value={values.quantity}
+              aria-invalid={!!errors.quantity}
+              onChange={(e) => update("quantity", e.target.value)}
+            />
+          </Field>
+        )}
         <div className="ops-wide">
           <Field label="Observaciones" id="item-notes" error={errors.notes}>
             <textarea
